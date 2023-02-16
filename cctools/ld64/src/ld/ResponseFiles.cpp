@@ -209,21 +209,11 @@ struct string_list* at_paths, int *hint_p)
       }
 
       char* addr = NULL;
-      size_t size = sb.st_size;
-      bool used_mmap = true;
+      bool used_mmap = false;
       if (sb.st_size) {
 	addr = (char*)mmap(0, (size_t)sb.st_size, PROT_READ | PROT_WRITE,
 		    MAP_FILE | MAP_PRIVATE, fd, 0);
-	if (MAP_FAILED == addr) {
-	  used_mmap = false;
-	  addr = (char *)malloc(size + 1);
-	  if (-1 == read(fd, addr, size)) {
-	    close(fd);
-	    throwf("can't read %s: %s\n", at_path, strerror(errno));
-	    return EXPAND_ERROR;
-	  }
-	  addr[size] = '\0';
-	}
+	used_mmap = MAP_FAILED != addr;
       }
 
       if (close(fd)) {
@@ -231,6 +221,39 @@ struct string_list* at_paths, int *hint_p)
 	  throwf("can't munmap %s: %s\n", at_path, strerror(errno));
 	throwf("can't close %s: %s\n", at_path, strerror(errno));
 	return EXPAND_ERROR;
+      }
+
+      // if mmap fails then the input file is likely a special file (e.g. a
+      // pipe) that doesn't necessarily support st_size or some other method to
+      // ascertain the input size, so we fall back to allocating as we go
+      if (!used_mmap) {
+	size_t size = 4096;
+	size_t total_read = 0;
+	size_t num_read;
+
+	FILE *fp = fopen(at_path, "rb");
+
+	addr = (char *)malloc(size);
+
+	while ((num_read = fread(addr + total_read, 1, size - total_read, fp)) && 0 < num_read) {
+	  size *= 2;
+	  total_read += num_read;
+	  addr = (char*)realloc(addr, size);
+	}
+
+	total_read += num_read;
+
+	if (-1 == num_read) {
+	  close(fd);
+	  throwf("can't read %s: %s\n", at_path, strerror(errno));
+	  return EXPAND_ERROR;
+	}
+	addr[total_read] = '\0';
+
+	if (fclose(fp)) {
+	  throwf("can't close %s: %s\n", at_path, strerror(errno));
+	  return EXPAND_ERROR;
+	}
       }
 
       // build a new argument list now
